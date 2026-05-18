@@ -2,99 +2,110 @@ package main
 
 import (
 	"fmt"
-	"net/http"
-	"net/url"
 	"sync"
 	"time"
-
-	"golang.org/x/net/html"
 )
 
-func visit(n *html.Node, baseURL *url.URL, links []string) []string {
-	if n.Type == html.ElementNode && n.Data == "a" {
-		for _, attr := range n.Attr {
-			if attr.Key == "href" {
-				u, err := url.Parse(attr.Val)
-				if err != nil {
-					continue
-				}
+const (
+	baseURL    = "https://anurag.tech"
+	maxWorkers = 5
+	maxQueue   = 10000
+	maxDepth   = 2
+)
 
-				resolved := baseURL.ResolveReference(u)
-
-				links = append(links, resolved.String())
-			}
-		}
-	}
-
-	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		links = visit(c, baseURL, links)
-	}
-
-	return links
+type Job struct {
+	URL   string
+	Depth int
 }
 
-func Crawl(rawURL string) ([]string, error) {
-	resp, err := http.Get(rawURL)
-	if err != nil {
-		return nil, err
+func worker(
+	id int,
+	jobs chan Job,
+	visited map[string]bool,
+	mu *sync.Mutex,
+	wg *sync.WaitGroup,
+) {
+	for job := range jobs {
+		if job.Depth <= 0 {
+			wg.Done()
+			continue
+		}
+
+		normalized, err := normalizeURL(job.URL)
+		if err != nil {
+			wg.Done()
+			continue
+		}
+
+		if !sameHost(baseURL, normalized) {
+			wg.Done()
+			continue
+		}
+
+		mu.Lock()
+
+		if visited[normalized] {
+			mu.Unlock()
+			wg.Done()
+			continue
+		}
+
+		visited[normalized] = true
+
+		mu.Unlock()
+
+		fmt.Printf("[worker %d] crawling: %s\n", id, normalized)
+
+		links, err := Crawl(normalized)
+		if err != nil {
+			fmt.Println("error:", err)
+			wg.Done()
+			continue
+		}
+
+		for _, link := range links {
+			fmt.Println("found:", link)
+
+			wg.Add(1)
+
+			jobs <- Job{
+				URL:   link,
+				Depth: job.Depth - 1,
+			}
+		}
+
+		wg.Done()
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("bad status: %s", resp.Status)
-	}
-
-	doc, err := html.Parse(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	baseURL, err := url.Parse(rawURL)
-	if err != nil {
-		return nil, err
-	}
-
-	var links []string
-
-	links = visit(doc, baseURL, links)
-
-	return links, nil
 }
 
 func main() {
 	start := time.Now()
+
 	var wg sync.WaitGroup
-	linksCh := make(chan string)
+	var mu sync.Mutex
 
-	urls := []string{
-		"https://anurag.tech",
+	jobs := make(chan Job, maxQueue)
+
+	visited := make(map[string]bool)
+
+	for i := 0; i < maxWorkers; i++ {
+		go worker(
+			i,
+			jobs,
+			visited,
+			&mu,
+			&wg,
+		)
 	}
 
-	for _, url := range urls {
-		wg.Add(1)
+	wg.Add(1)
 
-		go func(url string) {
-			defer wg.Done()
-
-			links, err := Crawl(url)
-			if err != nil {
-				fmt.Println("error:", err)
-			} else {
-				for _, link := range links {
-					linksCh <- link
-				}
-			}
-		}(url)
+	jobs <- Job{
+		URL:   baseURL,
+		Depth: maxDepth,
 	}
 
-	go func() {
-		wg.Wait()
-		close(linksCh)
-	}()
+	wg.Wait()
 
-	for link := range linksCh {
-		fmt.Println(link)
-	}
-
-	fmt.Printf("program finished in: %v\n", time.Since(start))
+	fmt.Printf("\nfinished in %v\n", time.Since(start))
 }
