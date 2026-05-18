@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"golang.org/x/net/html"
 )
@@ -38,7 +39,17 @@ func normalizeURL(raw string) (string, error) {
 
 	u.Fragment = ""
 
+	q := u.Query()
+	u.RawQuery = q.Encode()
+
 	return u.String(), nil
+}
+
+var client = &http.Client{
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+	Timeout: time.Second * 10,
 }
 
 func visit(n *html.Node, baseURL *url.URL, links []string) []string {
@@ -63,30 +74,45 @@ func visit(n *html.Node, baseURL *url.URL, links []string) []string {
 	return links
 }
 
-func Crawl(rawURL string) ([]string, error) {
+func Crawl(rawURL string) (string, []string, error) {
 	resp, err := http.Get(rawURL)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("bad status: %s", resp.Status)
+		return "", nil, fmt.Errorf("bad status: %s", resp.Status)
 	}
 
 	doc, err := html.Parse(resp.Body)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 
 	baseURL, err := url.Parse(rawURL)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 
 	var links []string
-
 	links = visit(doc, baseURL, links)
+	title := extractTitle(doc)
 
-	return links, nil
+	return title, links, nil
+}
+
+func extractTitle(n *html.Node) string {
+	if n.Type == html.ElementNode && n.Data == "title" {
+		if n.FirstChild != nil {
+			return strings.TrimSpace(n.FirstChild.Data)
+		}
+		return ""
+	}
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if title := extractTitle(c); title != "" {
+			return title
+		}
+	}
+	return ""
 }
