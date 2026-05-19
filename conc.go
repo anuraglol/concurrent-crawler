@@ -77,14 +77,10 @@ func worker(
 		}
 
 		for _, link := range links {
-			fmt.Println("found:", link)
-
 			wg.Add(1)
-
-			jobs <- Job{
-				URL:   link,
-				Depth: job.Depth - 1,
-			}
+			go func(l string, d int) {
+				jobs <- Job{URL: l, Depth: d}
+			}(link, job.Depth-1)
 		}
 
 		wg.Done()
